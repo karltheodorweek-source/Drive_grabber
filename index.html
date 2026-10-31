@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Drive Grabber</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#1b1d21;--muted:#6a707b;--accent:#2563eb;--accentText:#fff;--border:#dfe3e8;--warn:#b45309;--ok:#15803d;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#0f1115;--card:#181b21;--text:#eceef2;--muted:#9aa1ad;--accent:#5b8cff;--accentText:#0b0d12;--border:#2a2f38;--warn:#f59e0b;--ok:#4ade80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:600px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:1.5rem;margin:8px 0 4px}
+p.sub{color:var(--muted);margin:0 0 16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:12px}
+label{display:block;font-weight:600;margin-bottom:6px}
+input[type=text],input[type=password]{width:100%;border:1px solid var(--border);border-radius:10px;padding:11px;font-size:16px;background:var(--bg);color:var(--text)}
+.row{display:flex;gap:8px;margin-top:10px}
+button,a.btn{flex:1;border:0;border-radius:10px;padding:12px 14px;font:600 16px -apple-system,sans-serif;text-align:center;text-decoration:none;cursor:pointer;background:var(--accent);color:var(--accentText);display:block}
+button.ghost{background:transparent;color:var(--text);border:1px solid var(--border)}
+button:disabled{opacity:.5}
+.muted{color:var(--muted);font-size:.9rem}
+.warn{color:var(--warn)}
+.ok{color:var(--ok)}
+.bar{height:8px;background:var(--border);border-radius:99px;overflow:hidden;margin:10px 0 6px}
+.bar>div{height:100%;width:0;background:var(--accent);transition:width .2s}
+.list{max-height:50vh;overflow:auto;border-top:1px solid var(--border);margin-top:10px}
+.item{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)}
+.item .n{flex:1;min-width:0;word-break:break-all;font-size:.92rem}
+.item a{color:var(--accent);font-weight:600;text-decoration:none;white-space:nowrap}
+details summary{cursor:pointer;font-weight:600}
+</style>
+</head>
+<body>
+<main>
+  <h1>Drive Grabber</h1>
+  <p class="sub">Paste a Google Drive folder link and download everything inside.</p>
+
+  <div class="card" id="keyCard">
+    <details id="keyBox">
+      <summary>API key <span id="keyState" class="muted"></span></summary>
+      <div style="margin-top:10px">
+        <label for="key">Your Google API key</label>
+        <input id="key" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="AIza…">
+        <div class="row"><button id="saveKey" type="button">Save key on this device</button></div>
+        <p class="muted" style="margin-bottom:0">Stored only in this browser. It is never sent anywhere except Google.</p>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <label for="link">Folder link</label>
+    <input id="link" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="https://drive.google.com/drive/folders/…">
+    <div class="row">
+      <button id="paste" class="ghost" type="button">Paste</button>
+      <button id="scan" type="button">List files</button>
+    </div>
+  </div>
+
+  <div id="status" class="muted"></div>
+  <div id="result"></div>
+
+  <p class="muted">Works for folders shared as “Anyone with the link”. Google Docs, Sheets and Slides are converted to PDF, XLSX and PPTX. Very large folders may run out of memory on a phone; if so, download files one by one.</p>
+</main>
+
+<script>
+(function(){
+  var $=function(i){return document.getElementById(i)};
+  var KS='dg_api_key', files=[], folderName='drive-folder', busy=false;
+
+  function getKey(){try{return localStorage.getItem(KS)||''}catch(e){return ''}}
+  function putKey(k){try{localStorage.setItem(KS,k)}catch(e){}}
+  var key=getKey();
+  function refreshKeyUI(){
+    key=getKey();
+    $('keyState').textContent=key?'· saved ✓':'· not set';
+    $('keyState').className=key?'ok':'warn';
+    $('keyBox').open=!key;
+  }
+  refreshKeyUI();
+  $('saveKey').addEventListener('click',function(){
+    var v=$('key').value.trim();
+    if(!v)return;
+    putKey(v);$('key').value='';refreshKeyUI();say('Key saved.','ok');
+  });
+
+  function say(t,cls){var s=$('status');s.textContent=t;s.className=cls||'muted';s.style.margin='0 0 12px'}
+  function fmt(b){if(!b)return '';var u=['B','KB','MB','GB'],i=0;while(b>=1024&&i<3){b/=1024;i++}return b.toFixed(i?1:0)+' '+u[i]}
+  function safe(n){return n.replace(/[\\\/:*?"<>|]/g,'_')}
+  function folderId(u){var m=u.match(/\/folders\/([\w-]{10,})/)||u.match(/[?&]id=([\w-]{10,})/);return m?m[1]:null}
+
+  var EXPORT={
+    'application/vnd.google-apps.document':['application/pdf','.pdf'],
+    'application/vnd.google-apps.spreadsheet':['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','.xlsx'],
+    'application/vnd.google-apps.presentation':['application/vnd.openxmlformats-officedocument.presentationml.presentation','.pptx'],
+    'application/vnd.google-apps.drawing':['image/png','.png']
+  };
+  var FOLDER='application/vnd.google-apps.folder';
+
+  async function apiError(r){
+    var m='';try{var j=await r.json();m=(j.error&&j.error.message)||''}catch(e){}
+    if(r.status===400&&/API key/i.test(m))return 'Google rejected the API key. Check that you pasted it correctly.';
+    if(r.status===403)return 'Access denied. Make sure the folder is shared as “Anyone with the link”, and the Drive API is enabled for your key. '+m;
+    if(r.status===404)return 'Folder not found, or it isn’t shared publicly.';
+    return 'Error '+r.status+'. '+m;
+  }
+
+  async function walk(id,path,acc){
+    var token='';
+    do{
+      var url='https://www.googleapis.com/drive/v3/files?q='+encodeURIComponent("'"+id+"' in parents and trashed=false")+
+        '&fields='+encodeURIComponent('nextPageToken,files(id,name,mimeType,size)')+
+        '&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true&key='+encodeURIComponent(key)+
+        (token?'&pageToken='+encodeURIComponent(token):'');
+      var r=await fetch(url);
+      if(!r.ok)throw new Error(await apiError(r));
+      var j=await r.json();
+      for(var i=0;i<j.files.length;i++){
+        var f=j.files[i],nm=safe(f.name);
+        if(f.mimeType===FOLDER){await walk(f.id,path+nm+'/',acc)}
+        else{
+          var ex=EXPORT[f.mimeType],skip=f.mimeType.indexOf('application/vnd.google-apps.')===0&&!ex;
+          acc.push({id:f.id,name:nm+(ex&&nm.toLowerCase().slice(-ex[1].length)!==ex[1]?ex[1]:''),
+            path:path+nm+(ex&&nm.toLowerCase().slice(-ex[1].length)!==ex[1]?ex[1]:''),
+            mime:f.mimeType,exp:ex?ex[0]:null,size:+f.size||0,skip:skip});
+        }
+      }
+      token=j.nextPageToken||'';
+      say('Found '+acc.length+' files…');
+    }while(token);
+  }
+
+  function fileUrl(f){ // for the zip (fetch)
+    if(f.exp)return 'https://www.googleapis.com/drive/v3/files/'+f.id+'/export?mimeType='+encodeURIComponent(f.exp)+'&key='+encodeURIComponent(key);
+    return 'https://www.googleapis.com/drive/v3/files/'+f.id+'?alt=media&supportsAllDrives=true&key='+encodeURIComponent(key);
+  }
+  function linkUrl(f){ // for the single tap download
+    if(f.exp){
+      var t={'application/vnd.google-apps.document':'document','application/vnd.google-apps.spreadsheet':'spreadsheets','application/vnd.google-apps.presentation':'presentation'}[f.mime];
+      if(f.mime.indexOf('document')>0)return 'https://docs.google.com/document/d/'+f.id+'/export?format=pdf';
+      if(f.mime.indexOf('spreadsheet')>0)return 'https://docs.google.com/spreadsheets/d/'+f.id+'/export?format=xlsx';
+      if(f.mime.indexOf('presentation')>0)return 'https://docs.google.com/presentation/d/'+f.id+'/export/pptx';
+    }
+    return 'https://drive.usercontent.google.com/download?id='+f.id+'&export=download&confirm=t';
+  }
+
+  function renderList(){
+    var out=$('result');out.textContent='';
+    var ok=files.filter(function(f){return !f.skip}),total=ok.reduce(function(a,f){return a+f.size},0);
+    var card=document.createElement('div');card.className='card';
+    var h=document.createElement('div');h.style.fontWeight='600';
+    h.textContent=folderName+' · '+ok.length+' files'+(total?' · '+fmt(total):'');
+    card.appendChild(h);
+    var skipped=files.length-ok.length;
+    if(skipped){var sp=document.createElement('div');sp.className='muted warn';sp.textContent=skipped+' item(s) skipped (shortcuts, forms or other Google-only types).';card.appendChild(sp)}
+    if(!ok.length){var e=document.createElement('div');e.className='muted';e.textContent='Nothing to download here.';card.appendChild(e);out.appendChild(card);return}
+    var row=document.createElement('div');row.className='row';
+    var zb=document.createElement('button');zb.id='zipBtn';zb.type='button';zb.textContent='Download all as ZIP';
+    row.appendChild(zb);card.appendChild(row);
+    var bar=document.createElement('div');bar.className='bar';var bi=document.createElement('div');bar.appendChild(bi);bar.style.display='none';
+    var pt=document.createElement('div');pt.className='muted';pt.id='zipMsg';
+    var save=document.createElement('div');save.id='saveSlot';
+    card.append(bar,pt,save);
+    var list=document.createElement('div');list.className='list';
+    ok.forEach(function(f){
+      var it=document.createElement('div');it.className='item';
+      var n=document.createElement('div');n.className='n';n.textContent=f.path+(f.size?'  ('+fmt(f.size)+')':'');
+      var a=document.createElement('a');a.href=linkUrl(f);a.textContent='Get';a.rel='noopener';
+      it.append(n,a);list.appendChild(it);
+    });
+    card.appendChild(list);out.appendChild(card);
+    zb.addEventListener('click',function(){makeZip(ok,zb,bar,bi,pt,save)});
+  }
+
+  async function makeZip(ok,btn,bar,bi,pt,save){
+    if(busy)return;busy=true;btn.disabled=true;save.textContent='';bar.style.display='block';
+    var zip=new JSZip(),used={},failed=[],done=0;
+    for(var i=0;i<ok.length;i++){
+      var f=ok[i];pt.textContent='Fetching '+(i+1)+' of '+ok.length+': '+f.name;
+      try{
+        var r=await fetch(fileUrl(f));
+        if(!r.ok)throw new Error(r.status);
+        var p=f.path,c=used[p]||0;used[p]=c+1;
+        if(c){var d=p.lastIndexOf('.');p=d>p.lastIndexOf('/')?p.slice(0,d)+' ('+c+')'+p.slice(d):p+' ('+c+')'}
+        zip.file(p,await r.blob());
+      }catch(e){failed.push(f.path)}
+      done++;bi.style.width=(done/ok.length*90)+'%';
+    }
+    try{
+      pt.textContent='Building ZIP…';
+      var blob=await zip.generateAsync({type:'blob',compression:'STORE'},function(m){bi.style.width=(90+m.percent/10)+'%'});
+      var a=document.createElement('a');a.className='btn';a.href=URL.createObjectURL(blob);a.download=safe(folderName)+'.zip';
+      a.textContent='Save ZIP ('+fmt(blob.size)+')';a.style.marginTop='10px';
+      save.appendChild(a);
+      pt.textContent=failed.length?('Done, but '+failed.length+' file(s) failed: '+failed.slice(0,3).join(', ')+(failed.length>3?'…':'')):'Done. Tap the button to save.';
+      pt.className=failed.length?'muted warn':'muted ok';
+    }catch(e){
+      pt.textContent='Could not build the ZIP (probably out of memory). Use the “Get” buttons to download files one by one.';pt.className='muted warn';
+    }
+    busy=false;btn.disabled=false;
+  }
+
+  $('paste').addEventListener('click',function(){
+    if(navigator.clipboard&&navigator.clipboard.readText){
+      navigator.clipboard.readText().then(function(t){$('link').value=t.trim()}).catch(function(){$('link').focus()});
+    }else $('link').focus();
+  });
+
+  $('scan').addEventListener('click',async function(){
+    if(busy)return;
+    if(!key){say('Add your API key first.','warn');$('keyBox').open=true;return}
+    var id=folderId($('link').value);
+    if(!id){say('That doesn’t look like a Drive folder link.','warn');return}
+    $('result').textContent='';files=[];busy=true;$('scan').disabled=true;say('Reading folder…');
+    try{
+      var r=await fetch('https://www.googleapis.com/drive/v3/files/'+id+'?fields=name&supportsAllDrives=true&key='+encodeURIComponent(key));
+      if(!r.ok)throw new Error(await apiError(r));
+      folderName=(await r.json()).name||'drive-folder';
+      await walk(id,'',files);
+      say('');renderList();
+    }catch(e){say(e.message||'Something went wrong.','warn')}
+    busy=false;$('scan').disabled=false;
+  });
+})();
+</script>
+</body>
+</html>
